@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  Cloudformation Template for phonebook application that creates a stack of MySQL RDS Database, A fleet of ec2 instances managed by autoscaling group and an application load balancer.
+Parameters:
+  MyVPC:
+    Description: Select default vpc
+    Type: AWS::EC2::VPC::Id
+  MyKeyPair:
+    Description: Select KeyPair KeyName for SSH
+    Type: AWS::EC2::KeyPair::KeyName
+  MySubnets:
+    Description: Select Subnets
+    Type: List<AWS::EC2::Subnet::Id>
+Resources:
+  RDSSecurityGroup:
+    Type: AWS::RDS::DBSecurityGroup
+    Properties:
+      DBSecurityGroupIngress: # Required
+        - EC2SecurityGroupId: !GetAtt WebServerSecurityGroup.GroupId
+      EC2VpcId: !Ref MyVPC
+      GroupDescription: Allow traffic through port 3306 (Mysql) # Required
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic through port 80 and 22 # Required
+      GroupName: WebServerSG
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !GetAtt ALBSecurityGroup.GroupId
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      VpcId: !Ref MyVPC
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic through port 80 # Required
+      GroupName: AlBSG
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      VpcId: !Ref MyVPC
+  MyDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: false
+      BackupRetentionPeriod: 0
+      DBInstanceClass: db.t2.micro
+      DBInstanceIdentifier: phonebookdb
+      DBName: clarusway_phonebook
+      DBSecurityGroups:
+        - !Ref RDSSecurityGroup
+      Engine: MySQL
+      EngineVersion: 8.0.28
+      MasterUserPassword: awsdevops
+      MasterUsername: admin
+      Port: 3306
+      PubliclyAccessible: true
+  MyALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Name: phonebookalb
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets: !Ref MySubnets
+      Type: application
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions: # Required
+        - TargetGroupArn: !Ref MyTG
+          Type: forward
+      LoadBalancerArn: !Ref MyALB # Required
+      Port: 80
+      Protocol: HTTP
+  MyTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthyThresholdCount: 2
+      IpAddressType: ipv4
+      Name: MyTargetGroup
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref MyVPC
+  MyLT:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: phonebooklt
+      LaunchTemplateData:
+        ImageId: ami-0dfcb1ef8550277af
+        InstanceType: t2.micro
+        KeyName: !Ref MyKeyPair
+        SecurityGroupIds:
+          - !GetAtt WebServerSecurityGroup.GroupId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: 
+              - Key: Name
+                Value: !Sub Phonebook Web Server - ${AWS::StackName}
+        UserData:
+          Fn::Base64:
+            !Sub 
+              - |
+                #! /bin/bash
+                yum update -y
+                yum install python3 -y
+                pip3 install flask
+                pip3 install flask_mysql
+                echo "${MyDBURI}" > /home/ec2-user/dbserver.endpoint
+                TOKEN="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"
+                FOLDER="https://raw.githubusercontent.com/yhnkaya/Phonebook-Application-Python-Flask-/main"
+                curl -s --create-dirs -o "/home/ec2-user/templates/index.html" -L "$FOLDER"/templates/index.html
+                curl -s --create-dirs -o "/home/ec2-user/templates/add-update.html" -L "$FOLDER"/templates/add-update.html
+                curl -s --create-dirs -o "/home/ec2-user/templates/delete.html" -L "$FOLDER"/templates/delete.html
+                curl -s --create-dirs -o "/home/ec2-user/app.py" -L "$FOLDER"/phonebook-app.py
+                python3 /home/ec2-user/app.py
+              - MyDBURI: !GetAtt MyDB.Endpoint.Address
+  MyASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: phonebookasg
+      AvailabilityZones:
+        !GetAZs ""
+      DesiredCapacity: 2
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref MyLT
+        Version: !GetAtt MyLT.LatestVersionNumber
+      MaxSize: 3 # Required
+      MinSize: 1 # Required
+      TargetGroupARNs:
+        - !Ref MyTG
+Outputs:
+  DNSName:
+    Description: ALB Public Endpoint
+    Value: !Sub 
+      - http://${ALBDNS}
+      - ALBDNS: !GetAtt MyALB.DNSName
+
+
+
